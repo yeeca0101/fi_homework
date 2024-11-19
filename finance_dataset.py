@@ -19,6 +19,8 @@ class FinaceDataset(Dataset):
         self.trasform = transform
         
         self.init_csv()
+        self.norm = lambda x : x/255
+        # self.norm = lambda x : ((x/255)-0.5)/0.2
         self.tr = A.Compose([
             A.Resize(img_size, img_size, interpolation=cv2.INTER_NEAREST),
             A.OneOf([
@@ -30,8 +32,8 @@ class FinaceDataset(Dataset):
                 A.NoOp(p=1)  # 아무 변환도 적용하지 않을 확률
             ], p=0.5),   # OneOf 내의 변환 중 하나를 선택
             A.RandomBrightnessContrast(p=0.2),  # 밝기 및 대비 조정
-            A.GaussianBlur(blur_limit=3, p=0.2),  # 가우시안 블러
-            A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.2, 0.2, 0.2)),
+            A.GaussianBlur(blur_limit=(3,7), p=0.2),  # 가우시안 블러
+            # A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.2, 0.2, 0.2)),
             ToTensorV2()
         ])
     def decode_value(self,x):
@@ -54,6 +56,7 @@ class FinaceDataset(Dataset):
         input_tensor = transformed['image']
         target_tensor = transformed['mask']
         target_tensor = target_tensor.permute(2,0,1)
+        target_tensor = self.norm(target_tensor)
 
         data = {
             'image':input_tensor,
@@ -71,7 +74,7 @@ class FinaceDataset(Dataset):
         return self.df.__len__()
     
 if __name__ == '__main__':
-    dt = FinaceDataset('data/candlestick_data.csv',mode='last')
+    dt = FinaceDataset('data/candlestick_data_lnx.csv',mode='last')
     data = dt.__getitem__(0)
     print(data['image'].shape,data['target_image'].shape)
 
