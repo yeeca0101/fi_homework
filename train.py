@@ -17,7 +17,7 @@ from pytorch_lightning.strategies import DDPStrategy
 from models.attn_unet import get_model
 from finance_dataset import FinaceDataset
 from loss import loss_dict
-
+from metric import ValMetric
 
 
 
@@ -54,9 +54,8 @@ class IRDropPrediction(LightningModule):
         if args.finetune:
             self.model = init_weights_chkpt(self.model,args.save_folder)
 
-
-        self.metrics =
-        self.save_hyperparameters()
+        self.criterion = loss_dict[args.loss]
+        self.metrics = ValMetric()
 
     def forward(self, x):
         return self.model(x)
@@ -67,8 +66,8 @@ class IRDropPrediction(LightningModule):
         loss = self.criterion(outputs, targets)
         metrics = self.metrics.compute_metrics(outputs, targets)
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('train_mae', metrics['mae'], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('train_f1', metrics['f1'], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('train_mae', metrics['mae'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('train_ssim', metrics['ssim'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -77,7 +76,7 @@ class IRDropPrediction(LightningModule):
         loss = self.criterion(outputs, targets)
         metrics = self.metrics.compute_metrics(outputs, targets)
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('val_f1', metrics['f1'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_ssim', metrics['ssim'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('val_mae', metrics['mae'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
@@ -102,24 +101,9 @@ class IRDropPrediction(LightningModule):
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
             if args.dataset.lower() == 'began':
-                self.train_dataset, self.val_dataset = build_dataset(img_size=args.img_size,
-                                                                     pdn_density_p=args.pdn_density_dropout,
-                                                                     pdn_zeros=args.pdn_zeros,
-                                                                     in_ch=args.in_ch
+                self.train_dataset= FinaceDataset(csv_path='/workspace/fi_homework/data/splits/train.csv',
+                                                    mode='last'
                                                                      )
-            elif args.dataset.lower() == 'iccad':
-                self.train_dataset, self.val_dataset = build_dataset_iccad(finetune=args.finetune,
-                                                                            pdn_density_p=args.pdn_density_dropout,
-                                                                            pdn_zeros=args.pdn_zeros,
-                                                                            in_ch=args.in_ch,
-                                                                            img_size=args.img_size
-                                                                            )
-            elif args.dataset.lower() == 'asap7':
-                self.train_dataset, self.val_dataset = build_dataset_began_asap7(finetune=args.finetune,
-                                                                                   train=True,
-                                                                                    in_ch=args.in_ch,
-                                                                                    img_size=args.img_size
-                                                                                   )
             else:
                 raise NameError('check dataset name')
         
@@ -176,7 +160,7 @@ class CustomCheckpoint(Callback):
                         'net': pl_module.model.state_dict(),
                         'epoch': trainer.current_epoch,
                         'mae': trainer.callback_metrics.get('val_mae', None),
-                        'f1': trainer.callback_metrics.get('val_f1', None),
+                        'ssim': trainer.callback_metrics.get('val_ssim', None),
                     }
                     if self.best_model_file_name:
                         old_path = os.path.join(self.checkpoint_dir, self.best_model_file_name)
@@ -210,7 +194,7 @@ def main(i):
     
     if (not args.finetune) or (args.monitor_metric in 'val_mae'):
         monitor_metric = 'val_mae'  
-    else: monitor_metric = 'val_f1'
+    else: monitor_metric = 'val_ssim'
 
     checkpoint_callback = CustomCheckpoint(
         checkpoint_dir=args.save_folder,

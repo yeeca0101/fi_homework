@@ -10,8 +10,6 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-
-
 def _fspecial_gauss_1d(size: int, sigma: float) -> Tensor:
     r"""Create 1-D gauss kernel
     Args:
@@ -29,6 +27,7 @@ def _fspecial_gauss_1d(size: int, sigma: float) -> Tensor:
     return g.unsqueeze(0).unsqueeze(0)
 
 
+
 def gaussian_filter(input: Tensor, win: Tensor) -> Tensor:
     r""" Blur input with 1-D kernel
     Args:
@@ -44,19 +43,16 @@ def gaussian_filter(input: Tensor, win: Tensor) -> Tensor:
         conv = F.conv3d
     else:
         raise NotImplementedError(input.shape)
-
-    C = input.shape[1]
     out = input
     for i, s in enumerate(input.shape[2:]):
         if s >= win.shape[-1]:
-            out = conv(out, weight=win.transpose(2 + i, -1), stride=1, padding=0, groups=C)
+            out = conv(out, weight=win.transpose(2 + i, -1), stride=1, padding=0, groups=win.shape[0])
         else:
             warnings.warn(
                 f"Skipping Gaussian Smoothing at dimension 2+{i} for input: {input.shape} and win size: {win.shape[-1]}"
             )
 
     return out
-
 
 def _ssim(
     X: Tensor,
@@ -254,33 +250,23 @@ class SSIMLoss(torch.nn.Module):
         size_average: bool = True,
         win_size: int = 11,
         win_sigma: float = 1.5,
-        channel: int = 3,
         spatial_dims: int = 2,
         K: Union[Tuple[float, float], List[float]] = (0.01, 0.03),
         nonnegative_ssim: bool = False,
+        n_channels=3
     ) -> None:
-        r""" class for ssim
-        Args:
-            data_range (float or int, optional): value range of input images. (usually 1.0 or 255)
-            size_average (bool, optional): if size_average=True, ssim of all images will be averaged as a scalar
-            win_size: (int, optional): the size of gauss kernel
-            win_sigma: (float, optional): sigma of normal distribution
-            channel (int, optional): input channels (default: 3)
-            K (list or tuple, optional): scalar constants (K1, K2). Try a larger K2 constant (e.g. 0.4) if you get a negative or NaN results.
-            nonnegative_ssim (bool, optional): force the ssim response to be nonnegative with relu.
-        """
-
         super(SSIMLoss, self).__init__()
         self.win_size = win_size
-        self.win = _fspecial_gauss_1d(win_size, win_sigma).repeat([channel, 1] + [1] * spatial_dims)
+        self.win_sigma = win_sigma
         self.size_average = size_average
         self.data_range = data_range
         self.K = K
         self.nonnegative_ssim = nonnegative_ssim
+        self.spatial_dims = spatial_dims
+        self.win = _fspecial_gauss_1d(self.win_size, self.win_sigma).repeat([n_channels, 1] + [1] * self.spatial_dims)
 
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
-        Y = Y.unsqueeze(1)
-        return 1.-ssim(
+        return 1. - ssim(
             X,
             Y,
             data_range=self.data_range,
@@ -298,33 +284,23 @@ class MS_SSIMLoss(torch.nn.Module):
         size_average: bool = True,
         win_size: int = 11,
         win_sigma: float = 1.5,
-        channel: int = 3,
         spatial_dims: int = 2,
         weights: Optional[List[float]] = None,
         K: Union[Tuple[float, float], List[float]] = (0.01, 0.03),
+        n_channels=3
     ) -> None:
-        r""" class for ms-ssim
-        Args:
-            data_range (float or int, optional): value range of input images. (usually 1.0 or 255)
-            size_average (bool, optional): if size_average=True, ssim of all images will be averaged as a scalar
-            win_size: (int, optional): the size of gauss kernel
-            win_sigma: (float, optional): sigma of normal distribution
-            channel (int, optional): input channels (default: 3)
-            weights (list, optional): weights for different levels
-            K (list or tuple, optional): scalar constants (K1, K2). Try a larger K2 constant (e.g. 0.4) if you get a negative or NaN results.
-        """
-
         super(MS_SSIMLoss, self).__init__()
         self.win_size = win_size
-        self.win = _fspecial_gauss_1d(win_size, win_sigma).repeat([channel, 1] + [1] * spatial_dims)
+        self.win_sigma = win_sigma
         self.size_average = size_average
         self.data_range = data_range
         self.weights = weights
         self.K = K
+        self.spatial_dims = spatial_dims
+        self.win = _fspecial_gauss_1d(self.win_size, self.win_sigma).repeat([n_channels, 1] + [1] * self.spatial_dims)
 
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
-        Y = Y.unsqueeze(1)
-        return 1- ms_ssim(
+        return 1 - ms_ssim(
             X,
             Y,
             data_range=self.data_range,
@@ -334,6 +310,7 @@ class MS_SSIMLoss(torch.nn.Module):
             K=self.K,
         )
 
+
 loss_dict = {
     'ssim':SSIMLoss(data_range=1),
     'ms_ssim':MS_SSIMLoss(data_range=1)
@@ -342,16 +319,17 @@ loss_dict = {
 # # 예제 코드
 if __name__ == '__main__':
 
-    ssim_loss_fn =SSIMLoss(win_size=11, win_sigma=1.5, data_range=1, size_average=True, channel=1)
-    ms_ssim_loss_fn=MS_SSIMLoss(win_size=11, win_sigma=1.5, data_range=1, size_average=True, channel=1)
+    ch =1
+    ssim_loss_fn =SSIMLoss(win_size=11, win_sigma=1.5, data_range=1, size_average=True, n_channels=ch)
+    ms_ssim_loss_fn=MS_SSIMLoss(win_size=11, win_sigma=1.5, data_range=1, size_average=True, n_channels=ch)
 
-    # Suppose pred and target are torch tensors with shape (batch_size, channels, height, width)
-    pred = torch.randn(32, 1, 512, 512).cuda()
-    target = torch.randn(32, 512, 512).cuda()
+    pred = torch.randn(32, ch, 512, 512).cuda()
+    target = torch.randn(32,ch, 512, 512).cuda()
 
     def loss_test(pred,target,loss_fn):
         fn = torch.sigmoid
         fn = F.relu
+
         pred = fn(pred)
         target = fn(target)
 
