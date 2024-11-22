@@ -16,7 +16,7 @@ from pytorch_lightning.strategies import DDPStrategy
 
 from models.attn_unet import get_model
 from finance_dataset import FinaceDataset
-from loss import loss_dict
+from loss import CombLossFn
 from metric import ValMetric
 
 
@@ -25,59 +25,84 @@ parser = argparse.ArgumentParser(description='PyTorch Lightning Finance')
 parser.add_argument('--lr', default=5e-4, type=float, help='learning rate ')
 parser.add_argument('--save_folder', default='checkpoint', type=str, help='checkpoint save folder')
 parser.add_argument('--log_dir', default='logs', type=str, help='tensorboard log folder')
-parser.add_argument('--epoch', default=100, type=int, help='max epoch')
-parser.add_argument('--batch_size', default=8, type=int, help='batch size')
+parser.add_argument('--epoch', default=400, type=int, help='max epoch')
+parser.add_argument('--batch_size', default=16, type=int, help='batch size')
 parser.add_argument('--gpus', type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--finetune', type=bool, default=False, help='pre-train or fine-tuning [random,last]')
 parser.add_argument('--optim', type=str, default='adam', help='opitmizer')
 parser.add_argument('--dropout', type=str, default='dropblock', help='')
-parser.add_argument('--drop_p', type=float, default=0.2, help='dropout Probability')
-parser.add_argument('--loss', type=str, default='default', help='sup loss : ref losses folder')
+parser.add_argument('--drop_p', type=float, default=0.1, help='dropout Probability')
+parser.add_argument('--loss', type=str, default='ssim', help='sup loss : ref losses folder')
 parser.add_argument('--weight_decay', type=float, default=5e-4, help='5e4')
 parser.add_argument('--post_fix', type=str, default='', help='post fix of finetune checkpoint path')
-parser.add_argument('--scheduler', type=str, default='consineanealingwarmup', help='lr scheduler')
-parser.add_argument('--img_size', type=int, default=512, help='input img_size')
+parser.add_argument('--scheduler', type=str, default='cosineanealing', help='lr scheduler')
+parser.add_argument('--img_size', type=int, default=256, help='input img_size')
 parser.add_argument('--mixed_precision', type=bool, default=False, help='mixed_precision')
 parser.add_argument('--act', type=str, default='', help='')
+parser.add_argument('--arch', type=str, default='attn', help='')
 parser.add_argument('--replace_type', type=str, default='instance', help='')
+parser.add_argument('--monitor_metric', type=str, default='ssim', help='')
+parser.add_argument('--train_mode', type=str, default='last', help='')
+parser.add_argument('--all_mask', type=bool, default=False, help='')
+parser.add_argument('--alpha', type=float, default=0.5, help='')
 
 
 args = parser.parse_args()
 
 
 
-class IRDropPrediction(LightningModule):
+class PLModule(LightningModule):
     def __init__(self, lr):
         super().__init__()
         self.lr = lr
-        self.model = get_model(args.in_ch,3,args.dropout,args.drop_p)
+        self.arch = args.arch
+        self.model = get_model(3,3,args.dropout,args.drop_p,act=None,replace_mode='instance',v=args.arch)
         if args.finetune:
             self.model = init_weights_chkpt(self.model,args.save_folder)
 
-        self.criterion = loss_dict[args.loss]
+        self.criterion = CombLossFn(args.loss,args.alpha,reg_loss=True if self.arch == 'attnv4' else False)
         self.metrics = ValMetric()
-
+        self.num_workers = 4
+        
     def forward(self, x):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        inputs, targets = batch
-        outputs = self(inputs)
-        loss = self.criterion(outputs, targets)
-        metrics = self.metrics.compute_metrics(outputs, targets)
+        inputs, targets, targets_mask = batch['image'],batch['target_image'],batch['mask']
+        if self.arch != 'attnv4':
+            outputs,outputs_mask = self(inputs)
+            loss = self.criterion(outputs, targets, outputs_mask, targets_mask)
+            metrics = self.metrics.compute_metrics(outputs, targets,outputs_mask, targets_mask)
+        else:
+            reg_target = batch['change_rate']
+            outputs,outputs_mask,out_reg = self(inputs)
+            loss = self.criterion(outputs, targets, outputs_mask, targets_mask,out_reg,reg_target)
+            metrics = self.metrics.compute_metrics(outputs, targets,outputs_mask, targets_mask)
+        # outputs = outputs.view(args.batch_size, -1)
+        # targets = targets.view(args.batch_size, -1)
+        # mae = torch.mean(torch.abs(outputs - targets))
+        # loss = loss+mae
+
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('train_mae', metrics['mae'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('train_ssim', metrics['ssim'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('train_dice', metrics['dice'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        inputs, targets = batch
-        outputs = self(inputs)
-        loss = self.criterion(outputs, targets)
-        metrics = self.metrics.compute_metrics(outputs, targets)
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        inputs, targets, targets_mask = batch['image'],batch['target_image'],batch['mask']
+        if self.arch != 'attnv4':
+            outputs,outputs_mask = self(inputs)
+            loss = self.criterion(outputs, targets, outputs_mask, targets_mask)
+            metrics = self.metrics.compute_metrics(outputs, targets,outputs_mask, targets_mask)
+        else:
+            reg_target = batch['change_rate']
+            outputs,outputs_mask,out_reg = self(inputs)
+            loss = self.criterion(outputs, targets, outputs_mask, targets_mask,out_reg,reg_target)
+            metrics = self.metrics.compute_metrics(outputs, targets,outputs_mask, targets_mask)
         self.log('val_ssim', metrics['ssim'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('val_mae', metrics['mae'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_dice', metrics['dice'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def configure_optimizers(self):
@@ -100,17 +125,20 @@ class IRDropPrediction(LightningModule):
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
-            if args.dataset.lower() == 'began':
-                self.train_dataset= FinaceDataset(csv_path='/workspace/fi_homework/data/splits/train.csv',
-                                                    mode='last'
-                                                                     )
-            else:
-                raise NameError('check dataset name')
-        
+            self.train_dataset= FinaceDataset(csv_path='/workspace/fi_homework/data/splits/train.csv',
+                                                mode=args.train_mode,
+                                                train=True,
+                                                all_mask=args.all_mask
+                                                    )
+            self.val_dataset = FinaceDataset(csv_path='/workspace/fi_homework/data/splits/val.csv',
+                                                mode=args.train_mode,
+                                                train=False,
+                                                all_mask=args.all_mask
+                                                    )
         def test_dt(dt):
             inp = dt.__getitem__(0)[0]
             assert args.in_ch == inp.size(0), f"{args.in_ch} is not matching {inp.size(0)}"
-        test_dt(self.train_dataset)
+        # test_dt(self.train_dataset)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=self.num_workers)
@@ -124,7 +152,7 @@ def init_weights_chkpt(model, save_folder):
 
     # Assuming you want to load the latest checkpoint based on the file naming scheme
     # Sort files based on the version (assuming the format of the files is consistent)
-    checkpoint_files.sort(key=lambda x: int(x.split('_')[3].split('.')[0]), reverse=True)
+    # checkpoint_files.sort(key=lambda x: int(x.split('_')[3].split('.')[0]), reverse=True)
 
     # Construct full checkpoint path
     checkpoint_path = os.path.join(save_folder, checkpoint_files[0])
@@ -139,7 +167,7 @@ def init_weights_chkpt(model, save_folder):
 class CustomCheckpoint(Callback):
     def __init__(self, checkpoint_dir, repeat_idx, metric_name='val_mae', mode='min',post_fix=''):
         super().__init__()
-        self.checkpoint_dir = checkpoint_dir if args.post_fix == '' else f'{checkpoint_dir}/{args.post_fix}'
+        self.checkpoint_dir = f'{checkpoint_dir}/{args.loss}' if args.post_fix == '' else f'{checkpoint_dir}/{args.loss}/{args.post_fix}'
         if args.finetune:
             self.checkpoint_dir = os.path.join(self.checkpoint_dir,'finetune',args.loss,post_fix)
         self.best_metric = float('inf') if mode == 'min' else float('-inf')
@@ -166,7 +194,7 @@ class CustomCheckpoint(Callback):
                         old_path = os.path.join(self.checkpoint_dir, self.best_model_file_name)
                         os.remove(old_path)
                     
-                    self.best_model_file_name = f'IR_Drop_Model_{self.repeat_idx}_{trainer.current_epoch}_{val_metric:.4f}.pth'
+                    self.best_model_file_name = f'{self.repeat_idx}_{trainer.current_epoch}_{val_metric:.4f}.pth'
                     new_path = os.path.join(self.checkpoint_dir, self.best_model_file_name)
                     os.makedirs(self.checkpoint_dir, exist_ok=True)
                     torch.save(state, new_path)
@@ -176,31 +204,36 @@ def make_logdir():
     
     if args.finetune:           
         pre_train_loss = args.save_folder.split('/')[-1]
-        logdir = os.path.join(args.log_dir,f'{args.arch}/{args.dataset}/{pre_train_loss}')
+        logdir = os.path.join(args.log_dir,f'{args.arch}/{pre_train_loss}')
         logdir = os.path.join(logdir,f'finetune/{args.loss}')
     else:
-        logdir = os.path.join(args.log_dir,f'{args.arch}/{args.dataset}/{args.loss}')
-        if args.arch == 'attnv2':   logdir = os.path.join(logdir,args.dropout)
+        logdir = os.path.join(args.log_dir,f'{args.arch}/{args.loss}')
     
-    if not args.loss_with_logit:logdir = os.path.join(logdir,'sigmoid')
     logdir = f'{logdir}' if args.post_fix =='' else f'{logdir}/{args.post_fix}'
 
     return logdir
 
 def main(i):
-    model = IRDropPrediction(lr=args.lr)
+    model = PLModule(lr=args.lr)
     logdir = make_logdir()
     logger = TensorBoardLogger(save_dir=logdir, name=f'repeat_{i}')
     
-    if (not args.finetune) or (args.monitor_metric in 'val_mae'):
+    if args.monitor_metric == 'mae':
         monitor_metric = 'val_mae'  
-    else: monitor_metric = 'val_ssim'
+    elif args.monitor_metric == 'ssim':
+        monitor_metric ='val_ssim'
+    elif args.monitor_metric == 'dice':
+        monitor_metric ='val_dice'
+    if monitor_metric in ['val_ssim','val_dice']:
+        mode = 'max'
+    else: mode = 'min'
 
+    print(monitor_metric,'mode : ', )
     checkpoint_callback = CustomCheckpoint(
-        checkpoint_dir=args.save_folder,
+        checkpoint_dir=f'{args.save_folder}/{args.arch}' if not args.finetune else args.arch,
         repeat_idx=i,
         metric_name=monitor_metric, 
-        mode='min' if monitor_metric in 'val_mae' else 'max' ,
+        mode = mode,
         post_fix=args.post_fix
     )
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
@@ -219,14 +252,6 @@ def main(i):
     trainer.fit(model)
     torch.cuda.empty_cache()
 
-def main_cross_val(id):
-    pass
 
 if __name__ == '__main__':
-    if args.cross_val and args.dataset=='asap7':
-        cross_val_ids = [0,1,2,3] # dataset of cross validation has 4 samples 
-        for id in cross_val_ids:
-            main_cross_val(id)
-    else:
-        for i in range(1, args.repeat + 1):
-            main(i)
+    main(0)

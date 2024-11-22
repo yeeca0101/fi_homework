@@ -310,16 +310,63 @@ class MS_SSIMLoss(torch.nn.Module):
             K=self.K,
         )
 
+def dice_loss(pred, target, smooth=1e-5, logit=True):
+        # pred shape: (batch_size, num_classes, height, width)
+        # target shape: (batch_size, height, width) or (batch_size, num_classes, height, width)
+        if logit:
+            pred = torch.sigmoid(pred)
+        
+        # Flatten height and width dimensions
+        pred = pred.view(pred.size(0), pred.size(1), -1)
+        target = target.view(target.size(0), target.size(1), -1)
+        
+        # Compute intersection and union for each sample in the batch
+        intersection = (pred * target).sum(dim=2)
+        pred_sum = pred.sum(dim=2)
+        target_sum = target.sum(dim=2)
+        
+        # Compute Dice coefficient for each sample
+        dice_coefficient = (2. * intersection + smooth) / (pred_sum + target_sum + smooth)
+        
+        # Compute Dice loss for each sample
+        dice_loss = 1 - dice_coefficient
+        
+        # Return mean Dice loss over the batch
+        return dice_loss.mean()
+
+
+class CombLossFn(nn.Module):
+    def __init__(self,loss_fn,alpha=0.5,reg_loss=False,class_loss=False):
+        super().__init__()
+        self.restoration_loss_fn = loss_dict[loss_fn]
+        self.alpha = alpha
+        self.reg_loss = reg_loss
+        self.class_loss = class_loss
+
+    def forward(self,pred,target,
+                mask_pred,mask_target,
+                reg_out = None, reg_target=None,
+                class_out=None, class_target=None,
+                ):
+        dice_l = dice_loss(mask_pred,mask_target)
+        res_l = self.restoration_loss_fn(pred,target)
+        if self.reg_loss:reg_l = F.mse_loss(reg_out,reg_target)
+        else: reg_l=0.            
+        if self.class_loss:ce_l = F.binary_cross_entropy_with_logits(class_out,class_target)    
+        else: ce_l=0
+        
+        return self.alpha * dice_l + (1-self.alpha) * res_l + reg_l * 0.2 + ce_l * 0.1
 
 loss_dict = {
     'ssim':SSIMLoss(data_range=1),
-    'ms_ssim':MS_SSIMLoss(data_range=1)
+    'ms_ssim':MS_SSIMLoss(data_range=1),
+    
 }
 
 # # 예제 코드
 if __name__ == '__main__':
 
-    ch =1
+    ch =3
     ssim_loss_fn =SSIMLoss(win_size=11, win_sigma=1.5, data_range=1, size_average=True, n_channels=ch)
     ms_ssim_loss_fn=MS_SSIMLoss(win_size=11, win_sigma=1.5, data_range=1, size_average=True, n_channels=ch)
 
@@ -333,8 +380,11 @@ if __name__ == '__main__':
         pred = fn(pred)
         target = fn(target)
 
-        loss = loss_fn(pred, target)
+        loss = loss_fn(pred, target,pred,target)
         print(loss)
 
-    loss_test(pred,target,ms_ssim_loss_fn)
-    loss_test(pred,target,ssim_loss_fn)
+    # loss_test(pred,target,ms_ssim_loss_fn)
+    # loss_test(pred,target,ssim_loss_fn)
+
+    comb = CombLossFn('ssim')
+    loss_test(pred,target,comb)
